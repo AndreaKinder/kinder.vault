@@ -29,6 +29,7 @@ create table if not exists public.notes (
   aliases text[] not null default '{}',
   tags text[] not null default '{}',
   project_name text,
+  search_vector tsvector,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
 
@@ -43,37 +44,36 @@ create table if not exists public.notes (
   )
 );
 
--- Generated tsvector column for Full-Text Search
 alter table public.notes
-  add column if not exists search_vector tsvector
-  generated always as (
-    setweight(to_tsvector('simple', coalesce(title, '')), 'A') ||
-    setweight(to_tsvector('simple', coalesce(description, '')), 'B') ||
-    setweight(to_tsvector('simple', array_to_string(aliases, ' ')), 'B') ||
-    setweight(to_tsvector('simple', array_to_string(tags, ' ')), 'B') ||
-    setweight(to_tsvector('simple', coalesce(content, '')), 'C')
-  ) stored;
+  add column if not exists search_vector tsvector;
 
 create index if not exists notes_user_folder_idx on public.notes (user_id, folder);
 create index if not exists notes_tags_gin_idx on public.notes using gin (tags);
 create index if not exists notes_search_vector_gin_idx on public.notes using gin (search_vector);
 
--- Trigger to automatically update updated_at on row modification
-create or replace function public.set_updated_at()
+-- Trigger to keep updated_at and Full-Text Search vector in sync
+create or replace function public.notes_before_write()
 returns trigger
 language plpgsql
 as $$
 begin
   new.updated_at = now();
+  new.search_vector =
+    setweight(to_tsvector('simple', coalesce(new.title, '')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(new.description, '')), 'B') ||
+    setweight(to_tsvector('simple', array_to_string(coalesce(new.aliases, '{}'), ' ')), 'B') ||
+    setweight(to_tsvector('simple', array_to_string(coalesce(new.tags, '{}'), ' ')), 'B') ||
+    setweight(to_tsvector('simple', coalesce(new.content, '')), 'C');
   return new;
 end;
 $$;
 
 drop trigger if exists notes_set_updated_at on public.notes;
-create trigger notes_set_updated_at
-  before update on public.notes
+drop trigger if exists notes_before_write_trigger on public.notes;
+create trigger notes_before_write_trigger
+  before insert or update on public.notes
   for each row
-  execute function public.set_updated_at();
+  execute function public.notes_before_write();
 
 -- Row Level Security (RLS)
 alter table public.notes enable row level security;
